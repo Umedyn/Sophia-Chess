@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board</title>
+<style>
+  :root {
+    --sq: 68px;
+    --light: #e8e2d0;
+    --dark: #8a9b68;
+    --sel: rgba(66, 135, 245, .55);
+    --last: rgba(245, 205, 75, .55);
+    --check: rgba(220, 60, 60, .75);
+    --ink: #2b2b28;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; gap: 28px;
+    align-items: center; justify-content: center;
+    background: #22241f; color: #e9e7dd;
+    font: 15px/1.4 system-ui, sans-serif;
+  }
+  #panel { width: 240px; }
+  #panel h1 { font-size: 18px; margin: 0 0 12px; letter-spacing: .04em; }
+  #status { font-size: 15px; margin-bottom: 6px; }
+  #detail { color: #a9a89c; font-size: 13px; min-height: 20px; }
+  #result {
+    margin-top: 16px; padding: 10px 12px; border-radius: 8px;
+    background: #34372e; font-weight: 600; display: none;
+  }
+  #result.show { display: block; }
+
+  #controls { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+  #controls button {
+    padding: 10px 12px; border: 0; border-radius: 8px; cursor: pointer;
+    font: 600 14px system-ui, sans-serif; letter-spacing: .03em;
+    background: #cfe0a8; color: #21241f;
+  }
+  #controls button:hover:not(:disabled) { background: #dcebba; }
+  #controls button:disabled { background: #3a3d33; color: #6d6f63; cursor: default; }
+
+  #board {
+    display: grid;
+    grid-template-columns: repeat(8, var(--sq));
+    grid-template-rows: repeat(8, var(--sq));
+    border: 3px solid #3a3d33; border-radius: 4px; overflow: hidden;
+    position: relative; user-select: none;
+  }
+  .sq {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    font-size: calc(var(--sq) * .74); line-height: 1; cursor: default;
+  }
+  .sq.light { background: var(--light); }
+  .sq.dark  { background: var(--dark); }
+  .sq.last::before {
+    content: ""; position: absolute; inset: 0; background: var(--last);
+  }
+  .sq.sel::before {
+    content: ""; position: absolute; inset: 0; background: var(--sel);
+  }
+  .sq.check::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(circle, var(--check) 0%, transparent 72%);
+  }
+  .interactive .sq.playable { cursor: pointer; }
+  .sq .piece { position: relative; z-index: 1; }
+  .piece.w { color: #fbfbf6; text-shadow: 0 0 2px #000, 0 1px 2px rgba(0,0,0,.6); }
+  .piece.b { color: #201f1c; text-shadow: 0 0 1px #000, 0 1px 1px rgba(255,255,255,.25); }
+  .sq .dest {
+    position: absolute; z-index: 2; width: 30%; height: 30%; border-radius: 50%;
+    background: rgba(30,30,25,.35);
+  }
+  .sq .dest.capture {
+    width: 86%; height: 86%; background: transparent;
+    border: 5px solid rgba(30,30,25,.35);
+  }
+  .sq .label {
+    position: absolute; font-size: 11px; font-weight: 600; opacity: .6; z-index: 1;
+    color: var(--ink);
+  }
+  .sq .label.file { right: 4px; bottom: 2px; }
+  .sq .label.rank { left: 4px; top: 2px; }
+
+  #promo {
+    position: absolute; z-index: 10; display: none;
+    background: #f3f1e6; border-radius: 8px; padding: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5); gap: 4px;
+  }
+  #promo.show { display: flex; }
+  #promo button {
+    width: var(--sq); height: var(--sq); border: 0; border-radius: 6px;
+    background: #e8e2d0; font-size: calc(var(--sq) * .6); cursor: pointer;
+    color: #201f1c;
+  }
+  #promo button:hover { background: #cfe0a8; }
+
+  /* ---- OBS overlay: chrome-stripped, transparent, board only ---- */
+  body.overlay { background: transparent; gap: 0; }
+  body.overlay #panel { display: none; }
+  body.overlay #board { border-color: rgba(0,0,0,.35); }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <h1>BOARD</h1>
+    <div id="status">Connecting…</div>
+    <div id="detail"></div>
+    <div id="result"></div>
+    <div id="controls">
+      <button id="btnStart">Start Game</button>
+      <button id="btnRestart">Restart Game</button>
+    </div>
+  </div>
+
+  <div id="board"></div>
+  <div id="promo"></div>
+
+<script>
+  const GLYPH = { k:"♚", q:"♛", r:"♜", b:"♝", n:"♞", p:"♟" };
+  const overlay = new URLSearchParams(location.search).has("overlay");
+  if (overlay) document.body.classList.add("overlay");
+
+  let view = null, selected = null, lastFen = null, pending = null;
+
+  // ---- FEN -> {square: pieceChar} ------------------------------------------
+  function parseFEN(fen) {
+    const rows = fen.split(" ")[0].split("/");   // rows[0] = rank 8
+    const map = {};
+    for (let r = 0; r < 8; r++) {
+      const rank = 8 - r; let file = 0;
+      for (const ch of rows[r]) {
+        if (ch >= "1" && ch <= "8") file += +ch;
+        else { map[String.fromCharCode(97 + file) + rank] = ch; file++; }
+      }
+    }
+    return map;
+  }
+
+  function interactive() {
+    return view && view.started && view.active_is_human && !view.terminal && !overlay;
+  }
+
+  // ---- render the board from the current view ------------------------------
+  function render() {
+    const board = document.getElementById("board");
+    board.classList.toggle("interactive", interactive());
+    const map = parseFEN(view.fen);
+    const legal = view.legal_moves || [];
+    const last = view.last_move || "";
+    const lastFrom = last.slice(0, 2), lastTo = last.slice(2, 4);
+
+    let kingSq = null;
+    if (view.check) {
+      const kc = view.active_label === "white" ? "K" : "k";
+      kingSq = Object.keys(map).find(sq => map[sq] === kc);
+    }
+    const dests = selected
+      ? legal.filter(m => m.slice(0, 2) === selected).map(m => m.slice(2, 4))
+      : [];
+
+    let html = "";
+    for (let rank = 8; rank >= 1; rank--) {
+      for (let f = 0; f < 8; f++) {
+        const sq = String.fromCharCode(97 + f) + rank;
+        const dark = (f + rank) % 2 === 1;
+        const cls = ["sq", dark ? "dark" : "light"];
+        if (sq === lastFrom || sq === lastTo) cls.push("last");
+        if (sq === selected) cls.push("sel");
+        if (sq === kingSq) cls.push("check");
+        if (interactive() && legal.some(m => m.slice(0, 2) === sq)) cls.push("playable");
+
+        let inner = "";
+        const pc = map[sq];
+        if (pc) {
+          const color = pc === pc.toUpperCase() ? "w" : "b";
+          inner += `<span class="piece ${color}">${GLYPH[pc.toLowerCase()]}</span>`;
+        }
+        if (dests.includes(sq)) {
+          inner += `<span class="dest${map[sq] ? " capture" : ""}"></span>`;
+        }
+        if (f === 0) inner += `<span class="label rank">${rank}</span>`;
+        if (rank === 1) inner += `<span class="label file">${String.fromCharCode(97 + f)}</span>`;
+
+        html += `<div class="${cls.join(" ")}" data-sq="${sq}">${inner}</div>`;
+      }
+    }
+    board.innerHTML = html;
+  }
+
+  function renderStatus() {
+    const s = document.getElementById("status");
+    const d = document.getElementById("detail");
+    const res = document.getElementById("result");
+
+    document.getElementById("btnStart").disabled   = view.started && !view.terminal;
+    document.getElementById("btnRestart").disabled = !view.started;
+
+    if (!view.started) {
+      s.textContent = `${view.game} — press Start to begin`;
+      d.textContent = "";
+      res.classList.remove("show");
+      return;
+    }
+
+    s.textContent = `${view.game} — ${view.active_label} to move`;
+    const bits = [];
+    if (view.last_move) bits.push(`last: ${view.last_move}`);
+    if (view.check) bits.push("check");
+    if (view.active_is_human && !view.terminal) bits.push("your move — click a piece");
+    d.textContent = bits.join("  ·  ");
+
+    if (view.terminal && view.result && view.result.over) {
+      const r = view.result;
+      res.textContent = r.winner
+        ? `${r.winner} wins by ${r.reason} (${r.result})`
+        : `draw by ${r.reason} (${r.result})`;
+      res.classList.add("show");
+    } else {
+      res.classList.remove("show");
+    }
+  }
+
+  // ---- interaction ---------------------------------------------------------
+  document.getElementById("board").addEventListener("click", e => {
+    if (!interactive()) return;
+    const cell = e.target.closest(".sq");
+    if (!cell) return;
+    const sq = cell.dataset.sq;
+    const legal = view.legal_moves || [];
+
+    if (selected) {
+      const matches = legal.filter(m => m.slice(0, 2) === selected && m.slice(2, 4) === sq);
+      if (matches.length === 1) return sendMove(matches[0]);
+      if (matches.length > 1)  return showPromo(sq, matches);   // promotion fork
+      if (legal.some(m => m.slice(0, 2) === sq)) { selected = sq; render(); return; }
+      selected = null; render(); return;
+    }
+    if (legal.some(m => m.slice(0, 2) === sq)) { selected = sq; render(); }
+  });
+
+  function showPromo(toSq, matches) {
+    pending = { to: toSq };
+    const color = view.active_label === "white" ? "w" : "b";
+    const box = document.getElementById("promo");
+    box.innerHTML = "";
+    for (const m of matches) {
+      const p = m.slice(4) || "q";
+      const btn = document.createElement("button");
+      btn.innerHTML = `<span class="piece ${color}">${GLYPH[p]}</span>`;
+      btn.onclick = () => sendMove(m);
+      box.appendChild(btn);
+    }
+    // center the picker over the board
+    const b = document.getElementById("board").getBoundingClientRect();
+    box.style.left = (b.left + b.width / 2 - box.offsetWidth / 2) + "px";
+    box.style.top  = (b.top + b.height / 2 - 40) + "px";
+    box.classList.add("show");
+  }
+  function hidePromo() {
+    document.getElementById("promo").classList.remove("show");
+    pending = null;
+  }
+
+  async function sendMove(uci) {
+    selected = null; hidePromo();
+    try {
+      await fetch("/play", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          move: uci, turn_id: view.turn_id, slot: view.active_slot,
+        }),
+      });
+    } catch (e) {}
+    // next poll reflects the new position; nothing to do locally
+  }
+
+  // ---- poll loop (chained, so slow responses never stack) ------------------
+  async function poll() {
+    try {
+      const r = await fetch("/view");
+      if (r.ok) {
+        view = await r.json();
+        if (view.fen !== lastFen) { selected = null; hidePromo(); lastFen = view.fen; }
+        render();
+        renderStatus();
+      }
+    } catch (e) {}
+    setTimeout(poll, 500);
+  }
+  
+  async function post(path) {
+    try { await fetch(path, { method: "POST" }); } catch (e) {}
+  }
+  document.getElementById("btnStart").onclick   = () => post("/start");
+  document.getElementById("btnRestart").onclick = () => post("/restart");
+
+  poll();
+</script>
+</body>
+</html>
